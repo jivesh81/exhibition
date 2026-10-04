@@ -89,6 +89,9 @@ mlruns/
 # ML artifacts (local experiments - keep the main artifacts folder tracked)
 backend/ml/artifacts/*.tmp
 
+# Generated audio files (runtime)
+backend/voice_audio/
+
 # Environment example (template only)
 !.env.example
 
