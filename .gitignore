@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files (secrets)
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Database files (generated at runtime)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/coverage/
+frontend/*.local
+
+# Python package/build
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# Model checkpoints (if larger than 100MB - currently model is ~660KB so OK)
+# *.pkl
+# *.pth
+# *.pt
+# *.onnx
+# *.safetensors
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Test artifacts
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# MLflow
+mlruns/
+
+# ML artifacts (local experiments - keep the main artifacts folder tracked)
+backend/ml/artifacts/*.tmp
+
+# Environment example (template only)
+!.env.example
+
+# Package locks (keep for reproducible builds)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+requirements.txt
