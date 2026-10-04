@@ -2,6 +2,7 @@
 SafeSight AI — Voice Alert System
 =================================
 Text-to-speech system for autonomous worker-specific safety alerts.
+Generates audio files and serves them via HTTP for browser playback.
 Supports offline TTS (Piper, pyttsx3) with priority queue and cooldown.
 """
 
@@ -12,6 +13,8 @@ import json
 import os
 import subprocess
 import tempfile
+import uuid
+import shutil
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable
 from enum import Enum
@@ -44,6 +47,7 @@ class VoiceAlert:
     timestamp: float = field(default_factory=time.time)
     retry_count: int = 0
     metadata: Dict = field(default_factory=dict)
+    audio_file: Optional[str] = None  # Path to generated audio file
 
 
 class AlertCooldown:
@@ -54,7 +58,7 @@ class AlertCooldown:
 
     def __init__(
         self,
-        base_cooldown: float = 8.0,  # seconds
+        base_cooldown: float = 8.0,
         critical_cooldown: float = 3.0,
         escalation_override: bool = True,
     ):
@@ -62,20 +66,15 @@ class AlertCooldown:
         self.critical_cooldown = critical_cooldown
         self.escalation_override = escalation_override
 
-        # worker_id -> {severity: last_alert_time}
         self.last_alert: Dict[str, Dict[str, float]] = {}
-        # worker_id -> last_severity
         self.last_severity: Dict[str, str] = {}
         self._lock = threading.RLock()
 
     SEVERITY_RANK = {"SAFE": 0, "INFO": 1, "WARNING": 2, "HIGH": 3, "CRITICAL": 4}
 
     def should_alert(self, worker_id: str, severity: str) -> bool:
-        """Check if an alert should be sent for this worker/severity."""
         with self._lock:
             now = time.time()
-
-            # Initialize worker if new
             if worker_id not in self.last_alert:
                 self.last_alert[worker_id] = {}
                 self.last_severity[worker_id] = "SAFE"
@@ -84,21 +83,17 @@ class AlertCooldown:
             current_rank = self.SEVERITY_RANK.get(severity, 0)
             last_rank = self.SEVERITY_RANK.get(last_sev, 0)
 
-            # Always allow if severity increased (escalation)
             if self.escalation_override and current_rank > last_rank:
                 return True
 
-            # Check cooldown
             last_time = self.last_alert[worker_id].get(severity, 0)
             cooldown = self.critical_cooldown if severity == "CRITICAL" else self.base_cooldown
 
             if now - last_time >= cooldown:
                 return True
-
             return False
 
     def record_alert(self, worker_id: str, severity: str):
-        """Record that an alert was sent."""
         with self._lock:
             now = time.time()
             if worker_id not in self.last_alert:
@@ -107,27 +102,22 @@ class AlertCooldown:
             self.last_severity[worker_id] = severity
 
     def record_clear(self, worker_id: str):
-        """Record that worker is now clear (for recovery announcement)."""
         with self._lock:
             now = time.time()
             if worker_id not in self.last_alert:
                 self.last_alert[worker_id] = {}
-            # Use a special key for clear announcements
             self.last_alert[worker_id]["CLEAR"] = now
             self.last_severity[worker_id] = "SAFE"
 
     def should_announce_clear(self, worker_id: str) -> bool:
-        """Check if we should announce 'area clear'."""
         with self._lock:
             if worker_id not in self.last_alert:
                 return False
             last_clear = self.last_alert[worker_id].get("CLEAR", 0)
             last_alert = max(self.last_alert[worker_id].values()) if self.last_alert[worker_id] else 0
-            # Allow clear announcement if last alert was > 5s ago and no recent clear
             return (time.time() - last_alert > 5.0) and (time.time() - last_clear > 10.0)
 
     def get_status(self, worker_id: str) -> Dict:
-        """Get cooldown status for a worker."""
         with self._lock:
             if worker_id not in self.last_alert:
                 return {"cooldown_active": False, "last_severity": "SAFE"}
@@ -149,8 +139,8 @@ class TTSProvider:
         self.available = False
         self.error = None
 
-    def speak(self, text: str, blocking: bool = False) -> bool:
-        """Speak text. Returns True if successful."""
+    def generate_audio(self, text: str, output_path: str) -> bool:
+        """Generate audio file. Returns True if successful."""
         raise NotImplementedError
 
     def is_available(self) -> bool:
@@ -158,7 +148,7 @@ class TTSProvider:
 
 
 class Pyttsx3Provider(TTSProvider):
-    """Offline TTS using pyttsx3 (system voices)."""
+    """Offline TTS using pyttsx3 (system voices). Generates WAV files."""
 
     def __init__(self):
         super().__init__("pyttsx3")
@@ -169,37 +159,32 @@ class Pyttsx3Provider(TTSProvider):
         try:
             import pyttsx3
             self.engine = pyttsx3.init()
-            # Configure voice
             voices = self.engine.getProperty('voices')
-            # Prefer English voices
             for v in voices:
                 if 'english' in v.name.lower() or 'en' in v.id.lower():
                     self.engine.setProperty('voice', v.id)
                     break
-            self.engine.setProperty('rate', 170)  # words per minute
+            self.engine.setProperty('rate', 170)
             self.engine.setProperty('volume', 0.9)
             self.available = True
         except Exception as e:
             self.error = str(e)
             self.available = False
 
-    def speak(self, text: str, blocking: bool = False) -> bool:
+    def generate_audio(self, text: str, output_path: str) -> bool:
         if not self.available or self.engine is None:
             return False
         try:
-            self.engine.say(text)
-            if blocking:
-                self.engine.runAndWait()
-            else:
-                self.engine.runAndWait()  # pyttsx3 is synchronous anyway
-            return True
+            self.engine.save_to_file(text, output_path)
+            self.engine.runAndWait()
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
         except Exception as e:
             self.error = str(e)
             return False
 
 
 class PiperProvider(TTSProvider):
-    """Offline TTS using Piper (high quality, fast)."""
+    """Offline TTS using Piper (high quality, fast). Generates WAV files."""
 
     def __init__(self, model_path: Optional[str] = None):
         super().__init__("piper")
@@ -207,7 +192,6 @@ class PiperProvider(TTSProvider):
         self._check_available()
 
     def _find_model(self) -> Optional[str]:
-        # Look for Piper model in common locations
         search_paths = [
             Path.home() / ".local" / "share" / "piper" / "en_US-lessac-medium.onnx",
             Path("/usr/share/piper/voices/en_US-lessac-medium.onnx"),
@@ -220,7 +204,6 @@ class PiperProvider(TTSProvider):
 
     def _check_available(self):
         if self.model_path and Path(self.model_path).exists():
-            # Check if piper binary exists
             try:
                 result = subprocess.run(["piper", "--help"], capture_output=True, timeout=2)
                 self.available = result.returncode == 0
@@ -231,51 +214,30 @@ class PiperProvider(TTSProvider):
         else:
             self.error = "Piper model not found"
 
-    def speak(self, text: str, blocking: bool = False) -> bool:
+    def generate_audio(self, text: str, output_path: str) -> bool:
         if not self.available:
             return False
         try:
-            # Piper reads from stdin, writes WAV to stdout
             proc = subprocess.Popen(
-                ["piper", "--model", self.model_path, "--output-raw"],
+                ["piper", "--model", self.model_path, "--output_file", output_path],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            audio_data, _ = proc.communicate(input=text.encode(), timeout=10)
+            _, stderr = proc.communicate(input=text.encode(), timeout=15)
 
-            if proc.returncode == 0 and audio_data:
-                # Play audio using system player
-                if os.name == 'nt':  # Windows
-                    # Save to temp file and play
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                        # Add WAV header for raw PCM (16-bit, 22050 Hz, mono)
-                        import wave
-                        with wave.open(f.name, 'wb') as wav:
-                            wav.setnchannels(1)
-                            wav.setsampwidth(2)
-                            wav.setframerate(22050)
-                            wav.writeframes(audio_data)
-                        subprocess.run(["powershell", "-c", f"(New-Object Media.SoundPlayer '{f.name}').PlaySync()"], timeout=10)
-                        os.unlink(f.name)
-                else:  # Linux/Mac
-                    import wave
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                        with wave.open(f.name, 'wb') as wav:
-                            wav.setnchannels(1)
-                            wav.setsampwidth(2)
-                            wav.setframerate(22050)
-                            wav.writeframes(audio_data)
-                        subprocess.run(["aplay", f.name], timeout=10)
-                        os.unlink(f.name)
+            if proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
+            else:
+                self.error = stderr.decode() if stderr else "Piper generation failed"
+                return False
         except Exception as e:
             self.error = str(e)
-        return False
+            return False
 
 
 class EdgeTTSProvider(TTSProvider):
-    """Online TTS using Microsoft Edge TTS (requires internet)."""
+    """Online TTS using Microsoft Edge TTS (requires internet). Generates MP3 files."""
 
     def __init__(self, voice: str = "en-US-GuyNeural"):
         super().__init__("edge-tts")
@@ -290,38 +252,50 @@ class EdgeTTSProvider(TTSProvider):
             self.error = "edge-tts not installed"
             self.available = False
 
-    def speak(self, text: str, blocking: bool = False) -> bool:
+    def generate_audio(self, text: str, output_path: str) -> bool:
         if not self.available:
             return False
         try:
             import edge_tts
             import asyncio
 
-            async def _speak():
+            async def _generate():
                 communicate = edge_tts.Communicate(text, self.voice)
-                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-                    await communicate.save(f.name)
-                    # Play the file
-                    if os.name == 'nt':
-                        subprocess.run(["powershell", "-c", f"(New-Object Media.SoundPlayer '{f.name}').PlaySync()"], timeout=15)
-                    else:
-                        subprocess.run(["mpg123", "-q", f.name], timeout=15)
-                    os.unlink(f.name)
+                await communicate.save(output_path)
 
-            if blocking:
-                asyncio.run(_speak())
-            else:
-                # Run in thread
-                threading.Thread(target=lambda: asyncio.run(_speak()), daemon=True).start()
-            return True
+            asyncio.run(_generate())
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
         except Exception as e:
             self.error = str(e)
             return False
 
 
+# Audio storage directory
+VOICE_AUDIO_DIR = Path(__file__).parent.parent / "voice_audio"
+VOICE_AUDIO_DIR.mkdir(exist_ok=True)
+
+# Maximum audio files to keep (cleanup old ones)
+MAX_AUDIO_FILES = 100
+
+
+def _cleanup_old_audio():
+    """Remove old audio files if we exceed the limit."""
+    try:
+        files = sorted(VOICE_AUDIO_DIR.glob("*.wav")) + sorted(VOICE_AUDIO_DIR.glob("*.mp3"))
+        if len(files) > MAX_AUDIO_FILES:
+            for f in files[:-MAX_AUDIO_FILES]:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 class VoiceAlertSystem:
     """
     Main voice alert system with priority queue, cooldown, and multiple TTS providers.
+    Generates audio files for browser playback instead of playing through server speakers.
     """
 
     def __init__(
@@ -341,12 +315,10 @@ class VoiceAlertSystem:
         self._paused = False
         self._lock = threading.RLock()
 
-        # Callbacks
         self.on_alert_spoken: Optional[Callable[[VoiceAlert], None]] = None
         self.on_alert_failed: Optional[Callable[[VoiceAlert, str], None]] = None
         self.on_queue_update: Optional[Callable[[int], None]] = None
 
-        # Stats
         self.stats = {
             "total_alerts": 0,
             "spoken": 0,
@@ -358,11 +330,10 @@ class VoiceAlertSystem:
         self.start()
 
     def _init_default_providers(self) -> List[TTSProvider]:
-        """Initialize TTS providers in order of preference (offline first)."""
         providers = [
-            Pyttsx3Provider(),  # Offline, always available if installed
-            PiperProvider(),    # Offline, high quality
-            EdgeTTSProvider(),  # Online, fallback
+            Pyttsx3Provider(),
+            PiperProvider(),
+            EdgeTTSProvider(),
         ]
         return [p for p in providers if p.is_available()]
 
@@ -373,7 +344,6 @@ class VoiceAlertSystem:
         return None
 
     def start(self):
-        """Start the worker thread."""
         if self._worker_thread and self._worker_thread.is_alive():
             return
         self._stop_event.clear()
@@ -381,24 +351,19 @@ class VoiceAlertSystem:
         self._worker_thread.start()
 
     def stop(self):
-        """Stop the worker thread."""
         self._stop_event.set()
         if self._worker_thread:
             self._worker_thread.join(timeout=2)
 
     def pause(self):
-        """Pause alert processing."""
         self._paused = True
 
     def resume(self):
-        """Resume alert processing."""
         self._paused = False
 
     def enqueue_alert(self, alert: VoiceAlert) -> bool:
-        """Add alert to priority queue."""
         if not self.enabled:
             return False
-        # Priority queue uses (priority_value, timestamp, alert) for ordering
         priority_val = alert.priority.value
         self.alert_queue.put((priority_val, alert.timestamp, alert))
         self.stats["total_alerts"] += 1
@@ -417,8 +382,6 @@ class VoiceAlertSystem:
         message: str,
         metadata: Optional[Dict] = None,
     ) -> Optional[VoiceAlert]:
-        """Create and enqueue an alert if cooldown allows."""
-        # Map severity to priority
         priority_map = {
             "CRITICAL": AlertPriority.CRITICAL,
             "HIGH": AlertPriority.HIGH,
@@ -428,7 +391,6 @@ class VoiceAlertSystem:
         }
         priority = priority_map.get(severity, AlertPriority.INFO)
 
-        # Check cooldown
         if not self.cooldown.should_alert(worker_id, severity):
             self.stats["suppressed"] += 1
             return None
@@ -450,7 +412,6 @@ class VoiceAlertSystem:
         return alert
 
     def create_clear_announcement(self, worker_id: str, worker_name: str, zone: str) -> Optional[VoiceAlert]:
-        """Create a 'zone clear' announcement."""
         if not self.cooldown.should_announce_clear(worker_id):
             return None
 
@@ -469,14 +430,12 @@ class VoiceAlertSystem:
         return alert
 
     def _worker_loop(self):
-        """Background thread that processes the alert queue."""
         while not self._stop_event.is_set():
             if self._paused:
                 time.sleep(0.1)
                 continue
 
             try:
-                # Get next alert with timeout
                 priority_val, timestamp, alert = self.alert_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
@@ -485,12 +444,16 @@ class VoiceAlertSystem:
             if self.on_queue_update:
                 self.on_queue_update(self.alert_queue.qsize())
 
-            # Speak the alert
-            success = self._speak_alert(alert)
+            # Generate audio file
+            audio_file = self._generate_audio_file(alert)
+            if audio_file:
+                alert.audio_file = audio_file
+                success = True
+            else:
+                success = False
 
             if success:
                 self.stats["spoken"] += 1
-                # Log to database
                 try:
                     db.insert_voice_event(
                         alert.worker_id, alert.worker_name, alert.severity,
@@ -504,31 +467,41 @@ class VoiceAlertSystem:
                 self.stats["failed"] += 1
                 alert.retry_count += 1
                 if alert.retry_count < 3:
-                    # Re-queue with same priority
                     self.alert_queue.put((priority_val, alert.timestamp, alert))
                 elif self.on_alert_failed:
                     self.on_alert_failed(alert, "Max retries exceeded")
 
             self.alert_queue.task_done()
 
-    def _speak_alert(self, alert: VoiceAlert) -> bool:
-        """Speak alert using the active TTS provider."""
+    def _generate_audio_file(self, alert: VoiceAlert) -> Optional[str]:
+        """Generate audio file for the alert. Returns the filename (not full path)."""
         if not self.active_provider:
-            return False
+            return None
+
+        # Determine file extension based on provider
+        ext = ".mp3" if isinstance(self.active_provider, EdgeTTSProvider) else ".wav"
+        filename = f"{alert.alert_id}{ext}"
+        output_path = VOICE_AUDIO_DIR / filename
 
         try:
-            return self.active_provider.speak(alert.message, blocking=True)
+            success = self.active_provider.generate_audio(alert.message, str(output_path))
+            if success and output_path.exists() and output_path.stat().st_size > 0:
+                _cleanup_old_audio()
+                return filename
+            else:
+                if output_path.exists():
+                    output_path.unlink()
+                return None
         except Exception as e:
             self.active_provider.error = str(e)
             # Try fallback provider
             for provider in self.tts_providers:
                 if provider != self.active_provider and provider.is_available():
                     self.active_provider = provider
-                    return provider.speak(alert.message, blocking=True)
-            return False
+                    return self._generate_audio_file(alert)
+            return None
 
     def get_status(self) -> Dict:
-        """Get system status."""
         return {
             "enabled": self.enabled,
             "active_provider": self.active_provider.name if self.active_provider else "NONE",
@@ -538,11 +511,21 @@ class VoiceAlertSystem:
             "stats": self.stats.copy(),
         }
 
-    def speak_immediate(self, text: str) -> bool:
-        """Speak text immediately (bypass queue)."""
+    def speak_immediate(self, text: str) -> Optional[str]:
+        """Generate and return audio file immediately (bypass queue). Returns filename or None."""
         if not self.enabled or not self.active_provider:
-            return False
-        return self.active_provider.speak(text, blocking=True)
+            return None
+        alert = VoiceAlert(
+            alert_id=f"test-{int(time.time()*1000)}",
+            worker_id="TEST",
+            worker_name="Test",
+            severity="INFO",
+            priority=AlertPriority.INFO,
+            message=text,
+            root_cause="TEST",
+            zone="Test",
+        )
+        return self._generate_audio_file(alert)
 
 
 # Singleton

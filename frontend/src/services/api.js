@@ -41,6 +41,11 @@ export const api = {
   demoReset: () => request('/demo/reset', { method: 'POST' }),
   snapshot: () => request('/snapshot'),
   scenarios: () => request('/demo/scenarios'),
+  // Voice API
+  voiceTest: (text = 'SafeSight voice alert system is operational.') =>
+    request('/voice/test', { method: 'POST', body: JSON.stringify({ text }) }),
+  voiceStatus: () => request('/voice/status'),
+  voiceToggle: (enabled) => request('/voice/toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
   // real-AI frame inference (optional; graceful fallback)
   detectFrame: async (blob) => {
     const form = new FormData()

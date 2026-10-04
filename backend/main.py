@@ -107,9 +107,18 @@ def _on_snapshot(snapshot: dict):
 DEMO = DemoEngine(PROVIDERS, on_event=_on_event, on_snapshot=_on_snapshot)
 
 
+# Voice audio directory
+VOICE_AUDIO_DIR = os.path.join(BASE_DIR, "voice_audio")
+os.makedirs(VOICE_AUDIO_DIR, exist_ok=True)
+
+
 # Voice alert callback
 def _on_voice_alert(alert: VoiceAlert):
-    """Called when voice alert is spoken."""
+    """Called when voice alert is spoken and audio file is generated."""
+    audio_url = None
+    if alert.audio_file:
+        audio_url = f"/api/voice/audio/{alert.audio_file}"
+
     _broadcast_threadsafe({
         "type": "voice_alert",
         "alert": {
@@ -120,6 +129,8 @@ def _on_voice_alert(alert: VoiceAlert):
             "root_cause": alert.root_cause,
             "zone": alert.zone,
             "timestamp": datetime.fromtimestamp(alert.timestamp).isoformat(),
+            "audio_url": audio_url,
+            "alert_id": alert.alert_id,
         }
     })
 
@@ -863,12 +874,30 @@ def trigger_voice_alert(alert: dict):
 
 @app.post("/api/voice/test")
 def test_voice(text: str = "SafeSight AI voice system test."):
-    """Test voice system immediately (non-blocking)."""
-    import threading
-    def _speak():
-        VOICE_SYSTEM.speak_immediate(text)
-    threading.Thread(target=_speak, daemon=True).start()
-    return {"status": "queued", "provider": VOICE_SYSTEM.get_status()["active_provider"]}
+    """Test voice system - generate audio file for browser playback."""
+    filename = VOICE_SYSTEM.speak_immediate(text)
+    if filename:
+        return {"status": "generated", "provider": VOICE_SYSTEM.get_status()["active_provider"], "audio_url": f"/api/voice/audio/{filename}"}
+    else:
+        return {"status": "failed", "provider": VOICE_SYSTEM.get_status()["active_provider"]}
+
+
+@app.get("/api/voice/audio/{filename}")
+def get_voice_audio(filename: str):
+    """Serve generated voice audio file for browser playback."""
+    file_path = os.path.join(VOICE_AUDIO_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(404, "Audio file not found")
+    
+    # Determine MIME type based on extension
+    if filename.endswith(".mp3"):
+        media_type = "audio/mpeg"
+    elif filename.endswith(".wav"):
+        media_type = "audio/wav"
+    else:
+        media_type = "application/octet-stream"
+    
+    return FileResponse(file_path, media_type=media_type, filename=filename)
 
 
 @app.get("/api/voice/status")

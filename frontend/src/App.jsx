@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, BarChart3, LayoutDashboard, MapPin, ShieldCheck,
-  Users, Video, Wifi, WifiOff, Cpu,
+  Users, Video, Wifi, WifiOff, Cpu, Volume2, VolumeX, Mic, MicOff,
 } from 'lucide-react'
 import api from './services/api'
 import { connectAlertsWS } from './services/websocket'
+import { voiceService } from './services/voice'
 import Dashboard from './pages/Dashboard'
 import Incidents from './pages/Incidents'
 import Analytics from './pages/Analytics'
@@ -28,7 +29,8 @@ export default function App() {
   const [alerts, setAlerts] = useState([])
   const [dashboard, setDashboard] = useState(null)
   const [wsStatus, setWsStatus] = useState('CONNECTING')
-  const [refreshKey, setRefreshKey] = useState(0) // pages re-fetch when this changes
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [voiceStatus, setVoiceStatus] = useState({ enabled: false, queueLength: 0, isPlaying: false })
   const pageRef = useRef(page)
   pageRef.current = page
 
@@ -38,6 +40,24 @@ export default function App() {
     api.workers().then(setWorkers).catch(() => {})
     api.dashboard().then(setDashboard).catch(() => {})
     api.incidents({ status: 'OPEN' }).then(setAlerts).catch(() => {})
+    // Initialize voice service state
+    setVoiceStatus(voiceService.getStatus())
+  }, [])
+
+  // ---- Voice service callbacks ---------------------------------------
+  useEffect(() => {
+    voiceService.setCallbacks({
+      onStateChange: (status) => setVoiceStatus(status),
+      onPlaybackStart: (alert) => {
+        console.log('[Voice] Playing:', alert.worker_id, alert.severity);
+      },
+      onPlaybackEnd: (alert) => {
+        console.log('[Voice] Finished:', alert.worker_id);
+      },
+      onError: (alert, error) => {
+        console.error('[Voice] Error:', error);
+      },
+    })
   }, [])
 
   // ---- WebSocket live updates ---------------------------------------
@@ -59,6 +79,20 @@ export default function App() {
           setAlerts((prev) => prev.filter((a) => a.worker_id !== msg.worker_id))
           api.dashboard().then(setDashboard).catch(() => {})
           setRefreshKey((k) => k + 1)
+        } else if (msg.type === 'voice_alert') {
+          // Handle voice alert from backend - play audio in browser
+          if (msg.alert && msg.alert.audio_url) {
+            voiceService.addAlert({
+              alert_id: msg.alert.alert_id,
+              worker_id: msg.alert.worker_id,
+              worker_name: msg.alert.worker_name,
+              severity: msg.alert.severity,
+              message: msg.alert.message,
+              root_cause: msg.alert.root_cause,
+              zone: msg.alert.zone,
+              audio_url: msg.alert.audio_url,
+            });
+          }
         }
       },
     })
@@ -106,6 +140,35 @@ export default function App() {
       api.dashboard().then(setDashboard).catch(() => {})
       setRefreshKey((k) => k + 1)
     }).catch(() => {})
+  }, [])
+
+  // ---- Voice control callbacks ---------------------------------------
+  const toggleVoice = useCallback(async () => {
+    const newEnabled = !voiceStatus.enabled;
+    voiceService.setEnabled(newEnabled);
+    if (newEnabled) {
+      // Test the voice system
+      try {
+        const res = await api.voiceTest();
+        if (res.audio_url) {
+          voiceService.testVoice(res.audio_url);
+        }
+      } catch (e) {
+        console.warn('Voice test failed:', e);
+      }
+    }
+    setVoiceStatus(voiceService.getStatus());
+  }, [voiceStatus.enabled])
+
+  const testVoice = useCallback(async () => {
+    try {
+      const res = await api.voiceTest();
+      if (res.audio_url) {
+        voiceService.testVoice(res.audio_url);
+      }
+    } catch (e) {
+      console.error('Voice test failed:', e);
+    }
   }, [])
 
   const openIncidents = alerts.length
@@ -167,6 +230,55 @@ export default function App() {
               {wsStatus === 'CONNECTED' ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}{wsStatus}
             </span>
           </div>
+          
+          {/* Voice Status Panel */}
+          <div className="rounded bg-navy-800 border border-navy-600 p-2 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-mono text-slate-400">VOICE ALERTS</span>
+              <span className={`flex items-center gap-1 font-mono font-bold text-[10px] ${voiceStatus.enabled ? 'text-safe' : 'text-warn'}`}>
+                {voiceStatus.enabled ? <Volume2 className="w-3 h-3" /> : <VolumeX className="w-3 h-3" />}
+                {voiceStatus.enabled ? 'ENABLED' : 'DISABLED'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-slate-500">Queue</span>
+              <span className="font-mono text-slate-300">{voiceStatus.queueLength}</span>
+            </div>
+            <div className="flex items-center justify-between text-[9px]">
+              <span className="text-slate-500">Status</span>
+              <span className={`font-mono ${voiceStatus.isPlaying ? 'text-warn' : 'text-slate-400'}`}>
+                {voiceStatus.isPlaying ? '🔊 PLAYING' : 'IDLE'}
+              </span>
+            </div>
+            <div className="flex gap-1 pt-1">
+              <button
+                onClick={toggleVoice}
+                className={`flex-1 px-2 py-1.5 rounded text-[9px] font-mono transition-colors ${
+                  voiceStatus.enabled
+                    ? 'bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-600/30'
+                    : 'bg-amber-600/20 border border-amber-500/30 text-amber-400 hover:bg-amber-600/30'
+                }`}
+              >
+                {voiceStatus.enabled ? (
+                  <>
+                    <Mic className="w-3 h-3 mr-1" /> DISABLE
+                  </>
+                ) : (
+                  <>
+                    <MicOff className="w-3 h-3 mr-1" /> ENABLE
+                  </>
+                )}
+              </button>
+              <button
+                onClick={testVoice}
+                className="flex-1 px-2 py-1.5 rounded text-[9px] font-mono bg-blue-600/20 border border-blue-500/30 text-blue-400 hover:bg-blue-600/30 transition-colors"
+                title="Test voice alert system"
+              >
+                <Volume2 className="w-3 h-3 mr-1" /> TEST
+              </button>
+            </div>
+          </div>
+
           <div className="inline-flex items-center px-1.5 py-0.5 rounded bg-navy-800 border border-emerald-600/40 text-[9px] font-mono text-emerald-400 tracking-widest">
             EDGE-FIRST • NO CLOUD VIDEO
           </div>
