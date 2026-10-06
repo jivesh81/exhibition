@@ -344,11 +344,14 @@ class VoiceAlertSystem:
         return None
 
     def start(self):
+        print(f"[VOICE TRACE START] start() called, existing_thread={self._worker_thread}, alive={self._worker_thread.is_alive() if self._worker_thread else None}")
         if self._worker_thread and self._worker_thread.is_alive():
+            print(f"[VOICE TRACE START] Thread already alive, returning early")
             return
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name="VoiceAlertWorker")
         self._worker_thread.start()
+        print(f"[VOICE TRACE START] Thread started: {self._worker_thread}, alive={self._worker_thread.is_alive()}")
 
     def stop(self):
         self._stop_event.set()
@@ -391,8 +394,11 @@ class VoiceAlertSystem:
         }
         priority = priority_map.get(severity, AlertPriority.INFO)
 
+        print(f"[VOICE TRACE 2] create_alert called: worker={worker_id}, severity={severity}, message={message[:60]}")
+
         if not self.cooldown.should_alert(worker_id, severity):
             self.stats["suppressed"] += 1
+            print(f"[VOICE TRACE 2] SUPPRESSED by cooldown: worker={worker_id}, severity={severity}")
             return None
 
         alert = VoiceAlert(
@@ -409,6 +415,7 @@ class VoiceAlertSystem:
 
         self.cooldown.record_alert(worker_id, severity)
         self.enqueue_alert(alert)
+        print(f"[VOICE TRACE 2] Alert enqueued: alert_id={alert.alert_id}, queue_size={self.alert_queue.qsize()}")
         return alert
 
     def create_clear_announcement(self, worker_id: str, worker_name: str, zone: str) -> Optional[VoiceAlert]:
@@ -430,48 +437,58 @@ class VoiceAlertSystem:
         return alert
 
     def _worker_loop(self):
-        while not self._stop_event.is_set():
-            if self._paused:
-                time.sleep(0.1)
-                continue
+        print(f"[VOICE TRACE 3] Worker loop STARTED, thread={threading.current_thread().name}")
+        try:
+            while not self._stop_event.is_set():
+                if self._paused:
+                    time.sleep(0.1)
+                    continue
 
-            try:
-                priority_val, timestamp, alert = self.alert_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-
-            self.stats["queue_size"] = self.alert_queue.qsize()
-            if self.on_queue_update:
-                self.on_queue_update(self.alert_queue.qsize())
-
-            # Generate audio file
-            audio_file = self._generate_audio_file(alert)
-            if audio_file:
-                alert.audio_file = audio_file
-                success = True
-            else:
-                success = False
-
-            if success:
-                self.stats["spoken"] += 1
                 try:
-                    db.insert_voice_event(
-                        alert.worker_id, alert.worker_name, alert.severity,
-                        alert.message, alert.root_cause, alert.zone
-                    )
-                except Exception:
-                    pass
-                if self.on_alert_spoken:
-                    self.on_alert_spoken(alert)
-            else:
-                self.stats["failed"] += 1
-                alert.retry_count += 1
-                if alert.retry_count < 3:
-                    self.alert_queue.put((priority_val, alert.timestamp, alert))
-                elif self.on_alert_failed:
-                    self.on_alert_failed(alert, "Max retries exceeded")
+                    priority_val, timestamp, alert = self.alert_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
 
-            self.alert_queue.task_done()
+                self.stats["queue_size"] = self.alert_queue.qsize()
+                if self.on_queue_update:
+                    self.on_queue_update(self.alert_queue.qsize())
+
+                print(f"[VOICE TRACE 3] Worker loop processing alert: alert_id={alert.alert_id}, worker={alert.worker_id}, severity={alert.severity}, queue_remaining={self.alert_queue.qsize()}")
+
+                # Generate audio file
+                audio_file = self._generate_audio_file(alert)
+                if audio_file:
+                    alert.audio_file = audio_file
+                    success = True
+                else:
+                    success = False
+
+                if success:
+                    self.stats["spoken"] += 1
+                    try:
+                        db.insert_voice_event(
+                            alert.worker_id, alert.worker_name, alert.severity,
+                            alert.message, alert.root_cause, alert.zone
+                        )
+                    except Exception:
+                        pass
+                    if self.on_alert_spoken:
+                        print(f"[VOICE TRACE 4] on_alert_spoken callback firing: alert_id={alert.alert_id}, audio_file={alert.audio_file}")
+                        self.on_alert_spoken(alert)
+                else:
+                    self.stats["failed"] += 1
+                    alert.retry_count += 1
+                    if alert.retry_count < 3:
+                        self.alert_queue.put((priority_val, alert.timestamp, alert))
+                        print(f"[VOICE TRACE 3] Retry scheduled: alert_id={alert.alert_id}, retry_count={alert.retry_count}")
+                    elif self.on_alert_failed:
+                        self.on_alert_failed(alert, "Max retries exceeded")
+
+                self.alert_queue.task_done()
+        except Exception as e:
+            print(f"[VOICE TRACE 3] WORKER LOOP CRASHED: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _generate_audio_file(self, alert: VoiceAlert) -> Optional[str]:
         """Generate audio file for the alert. Returns the filename (not full path)."""

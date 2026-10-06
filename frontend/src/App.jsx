@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, BarChart3, LayoutDashboard, MapPin, ShieldCheck,
-  Users, Video, Wifi, WifiOff, Cpu, Volume2, VolumeX, Mic, MicOff,
+  Users, Video, Wifi, WifiOff, Cpu, Volume2, VolumeX, Mic, MicOff, Terminal,
 } from 'lucide-react'
 import api from './services/api'
 import { connectAlertsWS } from './services/websocket'
@@ -12,6 +12,7 @@ import Analytics from './pages/Analytics'
 import Workers from './pages/Workers'
 import Zones from './pages/Zones'
 import SystemStatus from './pages/SystemStatus'
+import VoiceDebugPanel from './components/VoiceDebugPanel'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', sub: 'Live Monitoring', icon: LayoutDashboard },
@@ -60,6 +61,34 @@ export default function App() {
     })
   }, [])
 
+  // Simple browser TTS fallback for alert messages
+const spokenAlertIds = new Set()
+
+function speakBrowserAlert(text) {
+  if (!('speechSynthesis' in window)) {
+    console.warn('[BROWSER TTS] speechSynthesis not supported')
+    return
+  }
+
+  window.speechSynthesis.cancel()
+
+  const utterance = new SpeechSynthesisUtterance(text)
+  utterance.rate = 0.95
+  utterance.pitch = 1.0
+  utterance.volume = 1.0
+
+  utterance.onstart = () =>
+    console.log('[BROWSER TTS] START', text)
+
+  utterance.onend = () =>
+    console.log('[BROWSER TTS] END')
+
+  utterance.onerror = (e) =>
+    console.error('[BROWSER TTS] ERROR', e)
+
+  window.speechSynthesis.speak(utterance)
+}
+
   // ---- WebSocket live updates ---------------------------------------
   useEffect(() => {
     const close = connectAlertsWS({
@@ -68,7 +97,41 @@ export default function App() {
         if (msg.type === 'snapshot') {
           setSnapshot(msg)
           setWorkers(msg.workers)
-        } else if (msg.type === 'alert') {
+        } else if (msg.type === 'alert' && msg.alert) {
+          const alert = msg.alert
+
+          console.log('[AUTO BROWSER TTS] ALERT RECEIVED', {
+            worker_id: alert.worker_id,
+            worker_name: alert.worker_name,
+            severity: alert.severity,
+            message: alert.message,
+            alert_id: alert.alert_id
+          })
+
+          if (alert.alert_id && spokenAlertIds.has(alert.alert_id)) {
+            console.log('[AUTO BROWSER TTS] DUPLICATE SKIPPED', alert.alert_id)
+          } else {
+            if (alert.alert_id) {
+              spokenAlertIds.add(alert.alert_id)
+            }
+
+            const worker = alert.worker_name || alert.worker_id || 'Worker'
+            const severity = alert.severity || 'WARNING'
+            const message =
+              alert.message ||
+              'Safety warning. Please move to a safe area.'
+
+            console.log('[AUTO BROWSER TTS] SPEAKING', {
+              worker,
+              severity,
+              message
+            })
+
+            speakBrowserAlert(
+              `${worker}. ${severity} alert. ${message}`
+            )
+          }
+
           setAlerts((prev) => {
             const rest = prev.filter((a) => a.worker_id !== msg.alert.worker_id)
             return [{ ...msg.alert, status: 'OPEN' }, ...rest].slice(0, 50)
@@ -80,6 +143,8 @@ export default function App() {
           api.dashboard().then(setDashboard).catch(() => {})
           setRefreshKey((k) => k + 1)
         } else if (msg.type === 'voice_alert') {
+          // DIAGNOSTIC: Log the complete received autonomous voice_alert
+          console.log("[AUTO VOICE RECEIVED]", JSON.stringify(msg, null, 2));
           // Handle voice alert from backend - play audio in browser
           if (msg.alert && msg.alert.audio_url) {
             voiceService.addAlert({
@@ -128,7 +193,11 @@ export default function App() {
     }).catch(() => {})
   }, [])
 
-  const demoStart = useCallback((scenario) => {
+  const demoStart = useCallback(async (scenario) => {
+    // Unlock audio context on demo start (user gesture) to allow autonomous alerts
+    if (voiceService.enabled) {
+      await voiceService.unlock();
+    }
     api.demoStart(scenario).then(() => setRefreshKey((k) => k + 1)).catch(() => {})
   }, [])
 
@@ -145,7 +214,7 @@ export default function App() {
   // ---- Voice control callbacks ---------------------------------------
   const toggleVoice = useCallback(async () => {
     const newEnabled = !voiceStatus.enabled;
-    voiceService.setEnabled(newEnabled);
+    await voiceService.setEnabled(newEnabled);
     if (newEnabled) {
       // Test the voice system
       try {
@@ -162,10 +231,9 @@ export default function App() {
 
   const testVoice = useCallback(async () => {
     try {
-      const res = await api.voiceTest();
-      if (res.audio_url) {
-        voiceService.testVoice(res.audio_url);
-      }
+      // Use the static test speech endpoint which serves a pre-generated valid WAV
+      const staticAudioUrl = '/api/voice/audio/test-speech-static';
+      voiceService.testVoice(staticAudioUrl);
     } catch (e) {
       console.error('Voice test failed:', e);
     }
@@ -281,6 +349,16 @@ export default function App() {
 
           <div className="inline-flex items-center px-1.5 py-0.5 rounded bg-navy-800 border border-emerald-600/40 text-[9px] font-mono text-emerald-400 tracking-widest">
             EDGE-FIRST • NO CLOUD VIDEO
+          </div>
+
+          {/* Voice Debug Panel (collapsible) */}
+          <div className="px-4 pb-4">
+            <VoiceDebugPanel
+              voiceStatus={voiceStatus}
+              wsStatus={wsStatus}
+              onTestVoice={testVoice}
+              onToggleVoice={toggleVoice}
+            />
           </div>
         </div>
       </aside>

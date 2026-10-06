@@ -1,14 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Dev server proxies API + WebSocket calls to the FastAPI backend (port 8000)
+// Dev server proxies API calls to the FastAPI backend (port 8000)
+// WebSocket connects directly to backend to avoid proxy issues
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
       '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
-      '/ws': { target: 'ws://127.0.0.1:8000', ws: true },
     },
   },
 })

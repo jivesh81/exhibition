@@ -91,10 +91,13 @@ class RiskFusionEngine:
         """Determine if a voice alert should be triggered."""
         # Trigger on HIGH or CRITICAL severity
         if assessment.severity in ("HIGH", "CRITICAL"):
+            print(f"[VOICE TRACE 0] voice_triggered=True: severity={assessment.severity}, root_cause={assessment.root_cause}, worker={worker.get('id')}")
             return True
         # Trigger on WARNING if it's a new escalation
         if assessment.severity == "WARNING" and assessment.overrides:
+            print(f"[VOICE TRACE 0] voice_triggered=True (WARNING with overrides): severity={assessment.severity}, root_cause={assessment.root_cause}, worker={worker.get('id')}")
             return True
+        print(f"[VOICE TRACE 0] voice_triggered=False: severity={assessment.severity}, root_cause={assessment.root_cause}, overrides={assessment.overrides}, worker={worker.get('id')}")
         return False
 
     def _generate_voice_message(self, assessment: RiskAssessment, worker: Dict) -> str:

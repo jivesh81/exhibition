@@ -84,22 +84,32 @@ SCENARIOS = {
     "multi_worker": {
         "id": "multi_worker",
         "name": "MULTI-WORKER SCENARIO",
-        "description": "Multiple workers with different risk levels",
-        "worker": "W-001",  # primary, but all workers move
+        "description": "5 workers with independent scenarios: safe, danger zone, PPE violation, proximity, critical",
+        "worker": "W-001",
         "camera": "CAM-01",
         "stages": [
-            {"id": "IDLE",        "ticks": 3, "label": "All workers in safe zones",
-             "move": None, "ppe": {}, "posture": "Normal", "facing_hazard": False},
-            {"id": "W002_APPROACH", "ticks": 6, "label": "W-002 approaches danger zone",
-             "move": {"W-002": [0.75, 0.35]}, "ppe": {}, "posture": "Normal", "facing_hazard": {"W-002": True}},
-            {"id": "W003_NO_PPE", "ticks": 4, "label": "W-003 missing helmet in warning zone",
-             "move": {"W-003": [0.3, 0.6]}, "ppe": {"W-003": {"helmet": False}}, "posture": "Normal", "facing_hazard": {"W-003": True}},
-            {"id": "W004_CRITICAL", "ticks": 4, "label": "W-004 enters critical zone",
-             "move": {"W-004": [0.8, 0.75]}, "ppe": {"W-004": {"helmet": True}}, "posture": "Unsafe", "facing_hazard": {"W-004": True}},
-            {"id": "ALL_EXIT",    "ticks": 6, "label": "All workers exit hazard zones",
-             "move": {"W-002": [0.4, 0.3], "W-003": [0.2, 0.4], "W-004": [0.5, 0.5]},
-             "ppe": {"W-003": {"helmet": True}, "W-004": {"helmet": True}}, "posture": "Normal", "facing_hazard": {}},
-            {"id": "COMPLETE",    "ticks": 2, "label": "Scenario complete",
+            {"id": "IDLE", "ticks": 4, "label": "All workers in safe zones",
+             "move": {"W-001": [0.25, 0.35], "W-002": [0.65, 0.39], "W-003": [0.18, 0.40], "W-004": [0.50, 0.68], "W-005": [0.12, 0.30]},
+             "ppe": {}, "posture": "Normal", "facing_hazard": False},
+            {"id": "W002_DANGER", "ticks": 10, "label": "W-002 approaches Crane Swing Area (danger zone)",
+             "move": {"W-001": [0.25, 0.35], "W-002": [0.75, 0.36], "W-003": [0.30, 0.60], "W-004": [0.55, 0.70], "W-005": [0.15, 0.35]},
+             "ppe": {}, "posture": "Normal", "facing_hazard": {"W-002": True, "W-004": True}},
+            {"id": "W003_PPE", "ticks": 6, "label": "W-003 loses helmet in Machine Operating Area (warning zone)",
+             "move": {"W-001": [0.28, 0.38], "W-002": [0.78, 0.34], "W-003": [0.35, 0.58], "W-004": [0.60, 0.72], "W-005": [0.18, 0.38]},
+             "ppe": {"W-003": {"helmet": False}}, "posture": "Normal", "facing_hazard": {"W-003": True}},
+            {"id": "W004_PROXIMITY", "ticks": 8, "label": "W-004 approaches W-001 creating proximity hazard in Restricted Area",
+             "move": {"W-001": [0.28, 0.38], "W-002": [0.80, 0.32], "W-003": [0.38, 0.55], "W-004": [0.65, 0.70], "W-005": [0.20, 0.40]},
+             "ppe": {"W-003": {"helmet": False}}, "posture": "Normal", "facing_hazard": {"W-004": True}},
+            {"id": "W004_CRITICAL", "ticks": 6, "label": "W-004 enters Restricted Area (critical zone) with unsafe posture",
+             "move": {"W-001": [0.30, 0.40], "W-002": [0.82, 0.30], "W-003": [0.40, 0.52], "W-004": [0.72, 0.72], "W-005": [0.22, 0.42]},
+             "ppe": {"W-003": {"helmet": False}, "W-004": {"helmet": True}}, "posture": "Unsafe", "facing_hazard": {"W-004": True}},
+            {"id": "W002_CRITICAL", "ticks": 6, "label": "W-002 enters Crane Swing Area without helmet - CRITICAL",
+             "move": {"W-001": [0.32, 0.42], "W-002": [0.72, 0.36], "W-003": [0.42, 0.50], "W-004": [0.75, 0.70], "W-005": [0.24, 0.44]},
+             "ppe": {"W-002": {"helmet": False}, "W-003": {"helmet": False}}, "posture": "Unsafe", "facing_hazard": {"W-002": True}},
+            {"id": "ALL_EXIT", "ticks": 8, "label": "All workers exit hazard zones, PPE restored",
+             "move": {"W-001": [0.20, 0.35], "W-002": [0.50, 0.40], "W-003": [0.25, 0.45], "W-004": [0.55, 0.55], "W-005": [0.15, 0.35]},
+             "ppe": {"W-002": {"helmet": True}, "W-003": {"helmet": True}}, "posture": "Normal", "facing_hazard": {}},
+            {"id": "COMPLETE", "ticks": 3, "label": "Scenario complete — all incidents logged",
              "move": None, "ppe": {}, "posture": "Normal", "facing_hazard": False},
         ],
     },
@@ -396,6 +406,9 @@ class DemoEngine:
                 })
                 workers_out.append(merged)
 
+                # DEMO TRACE: Log worker position and risk
+                print(f"[DEMO TRACE] worker={wid} pos=({w['x']:.2f},{w['y']:.2f}) zone={prox.get('zone')} in_zone={prox.get('in_zone')} dist={prox.get('distance')} risk={fusion_result.risk_assessment.final_risk_score:.1f} severity={fusion_result.risk_assessment.severity} voice_triggered={fusion_result.voice_alert_triggered}")
+
                 # Persist state
                 db.update_worker_state(wid, x=w["x"], y=w["y"],
                                        risk_score=fusion_result.risk_assessment.final_risk_score,
@@ -464,15 +477,19 @@ class DemoEngine:
         now_in_zone = prox["in_zone"]
         self._in_zone_prev[wid] = now_in_zone
 
+        # ALERT TRACE: Check alert decision
         if sev in ("WARNING", "HIGH", "CRITICAL"):
+            print(f"[ALERT TRACE] worker={wid} severity={sev} score={score} in_zone={prox.get('in_zone')} root_cause={worker.get('root_cause')} existing_alert={existing is not None}")
             if existing is None:
                 inc_id = self._create_incident(worker, prox, fusion_result)
                 self.active_alerts[wid] = {"incident_id": inc_id, "severity": sev,
                                            "root_cause": worker["root_cause"]}
                 self.on_event({"type": "alert", "alert": self._alert_payload(worker, inc_id, "OPEN", fusion_result),
                                "time": _now_hm()})
+                print(f"[ALERT CREATED] worker={wid} severity={sev} message={worker.get('root_cause')}")
                 # Trigger voice alert
                 if fusion_result.voice_alert_triggered:
+                    print(f"[VOICE TRACE 1] Alert received by voice decision layer: worker={wid}, severity={sev}, voice_triggered={fusion_result.voice_alert_triggered}, message={fusion_result.voice_message[:80]}")
                     self.voice_system.create_alert(
                         worker_id=wid,
                         worker_name=worker.get("name", wid),
@@ -481,6 +498,8 @@ class DemoEngine:
                         zone=worker.get("zone") or "Unknown",
                         message=fusion_result.voice_message,
                     )
+                else:
+                    print(f"[VOICE TRACE 1] Voice NOT triggered: worker={wid}, severity={sev}, voice_triggered={fusion_result.voice_alert_triggered}, overrides={fusion_result.risk_assessment.overrides}")
             elif SEVERITY_RANK[sev] > SEVERITY_RANK[existing["severity"]]:
                 # Escalation
                 db.execute("UPDATE incidents SET risk_score=?, severity=?, root_cause=?, status='OPEN' WHERE id=?",
